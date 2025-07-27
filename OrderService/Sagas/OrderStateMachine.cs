@@ -17,14 +17,17 @@ public class OrderStateMachine : MassTransitStateMachine<OrderState>
     #region states
     public State OrderCreatedState { get; private set; }
     public State ReservingInventoryState { get; private set; }
-    public State ProcessingPaymentState { get; private set; }
     public State CommitingInventoryState { get; private set; }
+    public State RollingbackInventoryState { get; private set; }
+    public State ProcessingPaymentState { get; private set; }
     #endregion
 
     public Event<OrderCreated> OrderCreated { get; private set; }
     public Event<InventoryReserved> InventoryReserved { get; private set; }
     public Event<PaymentProcessed> PaymentProcessed { get; private set; }
+    public Event<PaymentFailed> PaymentFailed { get; private set; }
     public Event<InventoryCommited> InventoryCommited { get; private set; }
+    public Event<InventoryRestored> InventoryRestored { get; private set; }
 
     public OrderStateMachine()
     {
@@ -36,6 +39,8 @@ public class OrderStateMachine : MassTransitStateMachine<OrderState>
         Event(() => InventoryReserved, x => x.CorrelateById(context => context.Message.OrderId));
         Event(() => PaymentProcessed, x => x.CorrelateById(context => context.Message.OrderId));
         Event(() => InventoryCommited, x => x.CorrelateById(context => context.Message.OrderId));
+        Event(() => InventoryRestored, x => x.CorrelateById(context => context.Message.OrderId));
+        Event(() => PaymentFailed, x => x.CorrelateById(context => context.Message.OrderId));
 
         //saga flow setup
         Initially(
@@ -53,13 +58,25 @@ public class OrderStateMachine : MassTransitStateMachine<OrderState>
                             context => new ProcessPaymentCommand(context.Message.OrderId))
                 .TransitionTo(ProcessingPaymentState)
         );
-
+ 
         During(ProcessingPaymentState,
             When(PaymentProcessed)
                 .Then(context => Console.WriteLine("payment processed"))
                 .Send(new Uri(InventoryServiceQueueUri), 
                             context => new CommitInventoryCommand(context.Message.OrderId))
-                .TransitionTo(CommitingInventoryState)
+                .TransitionTo(CommitingInventoryState),
+                
+            When(PaymentFailed)
+                .Then(context => Console.WriteLine("payment failed"))
+                .Send(new Uri(InventoryServiceQueueUri), 
+                            context => new RollbackInventoryCommand(context.Message.OrderId))
+                .TransitionTo(RollingbackInventoryState)
+        );
+
+        During(RollingbackInventoryState,
+            When(InventoryRestored)
+            .Then(context => Console.WriteLine("inventory restored"))
+            .Finalize()
         );
 
         During(CommitingInventoryState,
